@@ -19,17 +19,24 @@
         <androidx.appcompat.widget.Toolbar
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
+            android:layout_height="64dp"
             android:title="@string/app_name"
-            app:titleTextColor="@color/text_primary" />
+            app:titleTextColor="@color/text_primary"
+            app:titleTextAppearance="@style/LargeToolbarTitle" />
 
         <com.google.android.material.tabs.TabLayout
             android:id="@+id/libraryTabs"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="8dp"
             app:tabIndicatorColor="@color/accent"
+            app:tabIndicatorHeight="3dp"
             app:tabSelectedTextColor="@color/accent"
-            app:tabTextColor="@color/text_secondary">
+            app:tabTextColor="@color/text_secondary"
+            app:tabMode="fixed"
+            app:tabGravity="start">
 
             <com.google.android.material.tabs.TabItem
                 android:layout_width="wrap_content"
@@ -41,6 +48,11 @@
                 android:layout_height="wrap_content"
                 android:text="@string/tab_favorites" />
         </com.google.android.material.tabs.TabLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/divider" />
     </com.google.android.material.appbar.AppBarLayout>
 
     <androidx.recyclerview.widget.RecyclerView
@@ -48,7 +60,8 @@
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:clipToPadding="false"
-        android:paddingBottom="72dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="80dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -58,8 +71,9 @@
     <LinearLayout
         android:id="@+id/miniPlayerBar"
         android:layout_width="0dp"
-        android:layout_height="64dp"
-        android:background="@color/mini_player_background"
+        android:layout_height="68dp"
+        android:background="@drawable/bg_mini_player_rounded"
+        android:elevation="8dp"
         android:clickable="true"
         android:focusable="true"
         android:gravity="center_vertical"
@@ -86,6 +100,7 @@
                 android:maxLines="1"
                 android:textColor="@color/text_primary"
                 android:textStyle="bold"
+                android:textSize="15sp"
                 tools:text="Song Title" />
 
             <TextView
@@ -106,7 +121,7 @@
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="@string/action_play"
             android:src="@drawable/ic_play"
-            app:tint="@color/text_primary" />
+            app:tint="@color/accent" />
 
     </LinearLayout>
 
