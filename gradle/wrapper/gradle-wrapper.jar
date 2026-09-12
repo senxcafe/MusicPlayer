@@ -1,0 +1,483 @@
+package org.gradle.wrapper;
+
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.Closeable;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.FilenameFilter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.io.RandomAccessFile;
+import java.lang.reflect.Method;
+import java.math.BigInteger;
+import java.net.Authenticator;
+import java.net.PasswordAuthentication;
+import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.net.URLConnection;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.Formatter;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipException;
+import java.util.zip.ZipFile;
+
+import org.gradle.cli.CommandLineOption;
+import org.gradle.cli.CommandLineParser;
+import org.gradle.cli.ParsedCommandLine;
+import org.gradle.cli.ParsedCommandLineOption;
+import org.gradle.internal.file.PathTraversalChecker;
+import org.gradle.internal.file.locking.ExclusiveFileAccessManager;
+
+public class GradleWrapperMain {
+
+    public static void main(String[] args) throws Exception {
+        // Parse Command Line Arguments
+        CommandLineParser parser = new CommandLineParser();
+        parser.allowUnknownOptions();
+        
+        CommandLineOption userHomeOption = parser.option("g", "gradle-user-home");
+        userHomeOption.argumentType(String.class);
+
+        CommandLineOption quietOption = parser.option("q", "quiet");
+
+        CommandLineOption systemPropertiesOption = parser.option("D", "system-prop");
+        systemPropertiesOption.argumentType(String.class);
+        systemPropertiesOption.description("Set system property of the JVM (e.g. -Dmyprop=myvalue).");
+
+        ParsedCommandLine parsedCommandLine = parseCommandLine(parser, args);
+
+        // System properties configuration
+        Map<String, String> parsedSystemProperties = new HashMap<>();
+        if (parsedCommandLine.hasOption(systemPropertiesOption)) {
+            List<String> values = parsedCommandLine.getOption(systemPropertiesOption).getValues();
+            for (String value : values) {
+                int index = value.indexOf("=");
+                if (index != -1) {
+                    parsedSystemProperties.put(value.substring(0, index), value.substring(index + 1));
+                } else {
+                    parsedSystemProperties.put(value, "");
+                }
+            }
+        }
+        System.getProperties().putAll(parsedSystemProperties);
+
+        // Determine Wrapper Properties File Location
+        URI codeSourceUri = GradleWrapperMain.class.getProtectionDomain().getCodeSource().getLocation().toURI();
+        File jarFile;
+        if ("file".equals(codeSourceUri.getScheme())) {
+            jarFile = Paths.get(codeSourceUri).toFile();
+        } else {
+            throw new RuntimeException(String.format("Cannot determine classpath for wrapper Jar from codebase '%s'.", codeSourceUri));
+        }
+
+        File wrapperPropertiesFile = new File(jarFile.getParentFile(), jarFile.getName().replaceFirst("\\.jar$", ".properties"));
+        if (!wrapperPropertiesFile.exists()) {
+            throw new RuntimeException(String.format("Wrapper properties file '%s' does not exist.", wrapperPropertiesFile.getAbsolutePath()));
+        }
+
+        // Determine Gradle User Home
+        String gradleUserHomePath = null;
+        if (parsedCommandLine.hasOption(userHomeOption)) {
+            gradleUserHomePath = parsedCommandLine.getOption(userHomeOption).getValue();
+        }
+        if (gradleUserHomePath == null) {
+            gradleUserHomePath = System.getProperty("gradle.user.home");
+        }
+        if (gradleUserHomePath == null) {
+            gradleUserHomePath = System.getenv("GRADLE_USER_HOME");
+        }
+        if (gradleUserHomePath == null) {
+            gradleUserHomePath = GradleUserHomeLookup.DEFAULT_GRADLE_USER_HOME;
+        }
+
+        File gradleUserHome = new File(gradleUserHomePath);
+        File rootDir = wrapperPropertiesFile.getParentFile().getParentFile();
+
+        // Load Properties & Configuration
+        Properties wrapperProperties = SystemPropertiesHandler.getSystemProperties(new File(rootDir, "gradle.properties"));
+        Properties systemProperties = System.getProperties();
+        systemProperties.putAll(wrapperProperties);
+
+        WrapperExecutor wrapperExecutor = WrapperExecutor.forWrapperPropertiesFile(wrapperPropertiesFile);
+        WrapperConfiguration config = wrapperExecutor.getConfiguration();
+
+        boolean quiet = parsedCommandLine.hasOption(quietOption);
+        Logger logger = new Logger(quiet);
+
+        // Setup execution components
+        Download download = new Download();
+        PathAssembler pathAssembler = new PathAssembler(gradleUserHome, rootDir);
+        Install install = new Install(logger, download, pathAssembler);
+
+        // Install & Get Gradle Home
+        File gradleHome = install.createDist(config);
+
+        // Locate Launcher JAR and invoke main
+        File libDir = new File(gradleHome, "lib");
+        File[] jarFiles = libDir.listFiles(new FilenameFilter() {
+            @Override
+            public boolean accept(File dir, String name) {
+                return name.matches("gradle-launcher-.*\\.jar");
+            }
+        });
+
+        if (jarFiles == null || jarFiles.length == 0) {
+            throw new RuntimeException(String.format("Could not locate the Gradle launcher JAR in Gradle distribution '%s'.", gradleHome));
+        }
+
+        URL[] urls = new URL[]{jarFiles[0].toURI().toURL()};
+        URLClassLoader classLoader = new URLClassLoader(urls, ClassLoader.getSystemClassLoader());
+        Thread.currentThread().setContextClassLoader(classLoader);
+
+        Class<?> gradleMainClass = classLoader.loadClass("org.gradle.launcher.GradleMain");
+        Method mainMethod = gradleMainClass.getMethod("main", String[].class);
+        mainMethod.invoke(null, (Object) parsedCommandLine.getExtraArguments().toArray(new String[0]));
+    }
+
+    private static ParsedCommandLine parseCommandLine(CommandLineParser parser, String[] args) {
+        ParsedCommandLine parsedCommandLine = new ParsedCommandLine(new HashSet<>(parser.getOptionsByString().values()));
+        CommandLineParser.ParserState state = parser.new BeforeFirstSubCommand(parser, parsedCommandLine);
+
+        for (String arg : args) {
+            if (state.maybeStartOption(arg)) {
+                if (arg.equals("--")) {
+                    state = parser.new AfterOptions(parsedCommandLine);
+                } else if (arg.matches("--[^=]+")) {
+                    state = state.onStartOption(arg.substring(2), arg);
+                } else if (arg.matches("(?s)--[^=]+=.*")) {
+                    int eqIndex = arg.indexOf('=');
+                    state = state.onStartOption(arg.substring(2, eqIndex), arg);
+                    state = state.onArgument(arg.substring(eqIndex + 1));
+                    state = state.onComplete();
+                } else if (arg.matches("(?s)-[^=]=.*")) {
+                    state = state.onStartOption(arg.substring(1, 2), arg);
+                    state = state.onArgument(arg.substring(2));
+                    state = state.onComplete();
+                } else if (arg.matches("(?s)-[^-].*")) {
+                    String optionName = arg.substring(1, 2);
+                    state = state.onStartOption(optionName, arg);
+                    CommandLineOption option = parser.getOptionsByString().get(optionName);
+                    if (option != null && option.getHasArgument()) {
+                        if (arg.length() > 2) {
+                            state = state.onArgument(arg.substring(2));
+                            state = state.onComplete();
+                        }
+                    } else {
+                        state = state.onComplete();
+                        for (int i = 2; i < arg.length(); i++) {
+                            String flag = arg.substring(i, i + 1);
+                            state = state.onStartOption(flag, arg);
+                            state = state.onComplete();
+                        }
+                    }
+                }
+            } else {
+                state = state.onNonOption(arg);
+            }
+        }
+        state.onCommandLineEnd();
+        return parsedCommandLine;
+    }
+}
+
+class GradleUserHomeLookup {
+    public static final String DEFAULT_GRADLE_USER_HOME = System.getProperty("user.home") + "/.gradle";
+}
+
+class Logger implements Appendable {
+    private final boolean quiet;
+
+    public Logger(boolean quiet) {
+        this.quiet = quiet;
+    }
+
+    public void log(String message) {
+        if (!quiet) {
+            System.out.println(message);
+        }
+    }
+
+    @Override
+    public Appendable append(CharSequence csq) {
+        if (!quiet) {
+            System.out.print(csq);
+        }
+        return this;
+    }
+
+    @Override
+    public Appendable append(CharSequence csq, int start, int end) {
+        if (!quiet) {
+            System.out.print(csq.subSequence(start, end));
+        }
+        return this;
+    }
+
+    @Override
+    public Appendable append(char c) {
+        if (!quiet) {
+            System.out.print(c);
+        }
+        return this;
+    }
+}
+
+class Download {
+    public void download(URI address, File destination, Logger logger, DefaultDownloadProgressListener progressListener, Map<String, String> systemProperties, int networkTimeout) throws Exception {
+        Map<String, String> systemPropertiesMap = convertSystemProperties(System.getProperties());
+        systemPropertiesMap.putAll(systemProperties);
+
+        configureProxyAuthentication(systemPropertiesMap);
+
+        URLConnection connection = address.toURL().openConnection();
+        addBasicAuthentication(address, connection);
+
+        String userAgent = calculateUserAgent();
+        connection.setRequestProperty("User-Agent", userAgent);
+        connection.setConnectTimeout(networkTimeout);
+        connection.setReadTimeout(networkTimeout);
+
+        try (InputStream inputStream = connection.getInputStream();
+             OutputStream outputStream = new BufferedOutputStream(new FileOutputStream(destination))) {
+
+            long contentLength = connection.getContentLength();
+            byte[] buffer = new byte[8192];
+            long totalRead = 0;
+            int read;
+
+            while ((read = inputStream.read(buffer)) != -1) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new RuntimeException("Download was interrupted.");
+                }
+                outputStream.write(buffer, 0, read);
+                totalRead += read;
+                if (progressListener != null) {
+                    progressListener.downloadStatusChanged(totalRead, contentLength);
+                }
+            }
+        } catch (SocketTimeoutException e) {
+            throw new SocketTimeoutException(String.format("Downloading from %s failed: timeout (%d ms)", safeUri(address), networkTimeout));
+        }
+    }
+
+    public static Map<String, String> convertSystemProperties(Properties properties) {
+        Map<String, String> map = new HashMap<>();
+        for (Map.Entry<Object, Object> entry : properties.entrySet()) {
+            map.put(entry.getKey().toString(), entry.getValue().toString());
+        }
+        return map;
+    }
+
+    private void configureProxyAuthentication(Map<String, String> systemProperties) {
+        if (systemProperties.containsKey("http.proxyUser") || systemProperties.containsKey("https.proxyUser")) {
+            Authenticator.setDefault(new ProxyAuthenticator(systemProperties));
+        }
+    }
+
+    private void addBasicAuthentication(URI source, URLConnection connection) {
+        String userInfo = source.getUserInfo();
+        if (userInfo == null) {
+            return;
+        }
+
+        if (!"https".equals(source.getScheme())) {
+            System.out.println("WARNING Using HTTP Basic Authentication over an insecure connection to download the Gradle distribution. Please consider using HTTPS.");
+        }
+
+        String basicAuth;
+        try {
+            Class<?> base64Class = Class.forName("java.util.Base64");
+            Object encoder = base64Class.getMethod("getEncoder").invoke(null);
+            Method encodeMethod = encoder.getClass().getMethod("encodeToString", byte[].class);
+            basicAuth = (String) encodeMethod.invoke(encoder, (Object) userInfo.getBytes("UTF-8"));
+        } catch (Exception e) {
+            try {
+                Class<?> datatypeConverterClass = Class.forName("javax.xml.bind.DatatypeConverter");
+                Method printBase64Binary = datatypeConverterClass.getMethod("printBase64Binary", byte[].class);
+                basicAuth = (String) printBase64Binary.invoke(null, (Object) userInfo.getBytes("UTF-8"));
+            } catch (Exception ex) {
+                throw new RuntimeException("Downloading Gradle distributions with HTTP Basic Authentication is not supported on your JVM.", ex);
+            }
+        }
+
+        connection.setRequestProperty("Authorization", "Basic " + basicAuth);
+    }
+
+    public static URI safeUri(URI uri) {
+        try {
+            return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), uri.getPath(), uri.getQuery(), uri.getFragment());
+        } catch (URISyntaxException e) {
+            throw new RuntimeException("Failed to parse URI", e);
+        }
+    }
+
+    private String calculateUserAgent() {
+        String gradlewVersion = "1.0"; // fallback default
+        return String.format("gradlew %s/%s (%s;%s;%s)",
+                gradlewVersion,
+                System.getProperty("java.version"),
+                System.getProperty("os.name"),
+                System.getProperty("os.version"),
+                System.getProperty("os.arch"));
+    }
+
+    public static class DefaultDownloadProgressListener {
+        private final Logger logger;
+        private int previousDownloadPercent = -1;
+
+        public DefaultDownloadProgressListener(Logger logger) {
+            this.logger = logger;
+        }
+
+        public void downloadStatusChanged(long totalRead, long contentLength) {
+            if (contentLength <= 0) {
+                return;
+            }
+            int percent = (int) ((totalRead * 100) / contentLength);
+            percent = Math.max(0, Math.min(100, percent));
+            if (percent != previousDownloadPercent && percent % 10 == 0) {
+                previousDownloadPercent = percent;
+                logger.append('.');
+            }
+        }
+    }
+
+    private static class ProxyAuthenticator extends Authenticator {
+        private final Map<String, String> systemProperties;
+
+        public ProxyAuthenticator(Map<String, String> systemProperties) {
+            this.systemProperties = systemProperties;
+        }
+
+        @Override
+        protected PasswordAuthentication getPasswordAuthentication() {
+            String prefix = getRequestorType() == RequestorType.PROXY ? getRequestingURL().getProtocol() : "";
+            String user = systemProperties.get(prefix + ".proxyUser");
+            String password = systemProperties.get(prefix + ".proxyPassword");
+
+            if (user != null && password != null) {
+                return new PasswordAuthentication(user, password.toCharArray());
+            }
+            return null;
+        }
+    }
+}
+
+class Install {
+    private final Logger logger;
+    private final Download download;
+    private final PathAssembler pathAssembler;
+    private final ExclusiveFileAccessManager exclusiveFileAccessManager = new ExclusiveFileAccessManager(120000, 200);
+
+    public Install(Logger logger, Download download, PathAssembler pathAssembler) {
+        this.logger = logger;
+        this.download = download;
+        this.pathAssembler = pathAssembler;
+    }
+
+    public File createDist(final WrapperConfiguration configuration) throws Exception {
+        final PathAssembler.LocalDistribution localDist = pathAssembler.getDistribution(configuration);
+        final File distributionDir = localDist.getDistributionDir();
+        final File localZipFile = localDist.getZipFile();
+
+        return exclusiveFileAccessManager.access(localZipFile, new Callable<File>() {
+            @Override
+            public File call() throws Exception {
+                File markerFile = new File(distributionDir, localZipFile.getName() + ".ok");
+                InstallCheck check = verifyInstall(distributionDir, markerFile.getName());
+
+                if (check.gradleHome != null) {
+                    return check.gradleHome;
+                }
+
+                if (check.failureMessage != null) {
+                    System.err.println(check.failureMessage);
+                    markerFile.delete();
+                }
+
+                boolean forceFetch = configuration.getDistributionSha256Sum() != null;
+                if (forceFetch || !localZipFile.exists()) {
+                    File partFile = new File(localZipFile.getParentFile(), localZipFile.getName() + ".part");
+                    partFile.delete();
+
+                    logger.log("Downloading " + Download.safeUri(configuration.getDistribution()));
+                    download.download(configuration.getDistribution(), partFile, logger, new Download.DefaultDownloadProgressListener(logger), configuration.getSystemProperties(), configuration.getNetworkTimeout());
+
+                    if (!partFile.renameTo(localZipFile)) {
+                        throw new RuntimeException(String.format("Unable to rename file '%s' to '%s'.", partFile.getAbsolutePath(), localZipFile.getAbsolutePath()));
+                    }
+                }
+
+                if (configuration.getDistributionSha256Sum() != null) {
+                    verifyDownloadChecksum(configuration.getDistribution().toASCIIString(), localZipFile, configuration.getDistributionSha256Sum());
+                }
+
+                deleteDir(distributionDir);
+                unzipLocal(localZipFile, distributionDir);
+
+                InstallCheck postCheck = verifyInstall(distributionDir, markerFile.getName());
+                if (postCheck.gradleHome == null) {
+                    throw new RuntimeException(postCheck.failureMessage);
+                }
+
+                setExecutablePermissions(postCheck.gradleHome);
+                markerFile.createNewFile();
+
+                return postCheck.gradleHome;
+            }
+        });
+    }
+
+    private InstallCheck verifyInstall(File distributionDir, String okFileName) {
+        if (!distributionDir.exists()) {
+            return new InstallCheck(null, null);
+        }
+
+        File okFile = new File(distributionDir, okFileName);
+        if (!okFile.exists()) {
+            return new InstallCheck(null, null);
+        }
+
+        List<File> dirs = new ArrayList<>();
+        File[] files = distributionDir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    dirs.add(file);
+                }
+            }
+        }
+
+        if (dirs.isEmpty()) {
+            return new InstallCheck(null, String.format("Gradle distribution '%s' does not contain any directories. Expected to find exactly 1 directory.", distributionDir));
+        }
+
+        if (dirs.size() > 1) {
+            return new InstallC
