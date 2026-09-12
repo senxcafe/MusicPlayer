@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Apple Music Local Player</string>
+
+    <string name="tab_library">Library</string>
+    <string name="tab_favorites">Favorites</string>
+
+    <string name="search_hint">Search songs, artists, albums</string>
+
+    <string name="action_play">Play</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_next">Next</string>
+    <string name="action_previous">Previous</string>
+    <string name="action_shuffle">Shuffle</string>
+    <string name="action_repeat">Repeat</string>
+    <string name="action_favorite">Favorite</string>
+    <string name="action_collapse">Close now playing</string>
+
+    <string name="notification_channel_name">Music playback</string>
+    <string name="notification_channel_description">Shows the currently playing track and playback controls</string>
+
+    <string name="permission_denied_message">Music library access is required to show your songs.</string>
+
+    <string name="empty_library_message">No songs found on this device yet.</string>
+</resources>

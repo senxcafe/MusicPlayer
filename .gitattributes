@@ -1,0 +1,15 @@
+# Auto detect text files and normalize line endings to LF on checkin.
+* text=auto eol=lf
+
+# Windows batch files must keep CRLF
+*.bat text eol=crlf
+
+# Explicit binary files
+*.jar binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.apk binary
+*.keystore binary
+*.jks binary
